@@ -149,16 +149,15 @@ def _faceid_embeds(face_img: Image.Image, device: torch.device, dtype: torch.dty
     id_embeds = torch.cat([neg, ref], dim=0).to(device=device, dtype=dtype)  # (2,1,1,512)
     return [id_embeds]
 
-def _apply_plus_v2_clip_embeds(pipe, face_img: Image.Image, num_images: int):
+def _apply_plus_v2_clip_embeds(pipe, face_img: Image.Image):
     # For FaceID Plus v2, diffusers requires setting clip_embeds on the image projection layer.
     # See diffusers docs: using-diffusers/ip_adapter.md (FaceID Plus v2 section).
     try:
+        # IMPORTANT: we generate images one-by-one, so keep `num_images_per_prompt=1`.
+        # If this is set >1, diffusers will expand embeddings for batch generation and can
+        # mismatch the FaceID embeds batch shape (classifier-free guidance).
         clip_embeds = pipe.prepare_ip_adapter_image_embeds(
-            [face_img],
-            None,
-            pipe.device,
-            num_images,
-            True,
+            [face_img], None, pipe.device, 1, True
         )[0]
         layer = pipe.unet.encoder_hid_proj.image_projection_layers[0]
         layer.clip_embeds = clip_embeds.to(dtype=pipe.unet.dtype, device=pipe.device)
@@ -212,7 +211,7 @@ def handler(job: Dict[str, Any]):
     face_img = _decode_image_b64(face_b64).resize((512, 512))
     id_embeds = _faceid_embeds(face_img, device=device, dtype=pipe.unet.dtype)
     if "plus" in (IP_ADAPTER_WEIGHT or "").lower():
-        _apply_plus_v2_clip_embeds(pipe, face_img, num_images)
+        _apply_plus_v2_clip_embeds(pipe, face_img)
 
     outputs: List[Dict[str, Any]] = []
     i = 0

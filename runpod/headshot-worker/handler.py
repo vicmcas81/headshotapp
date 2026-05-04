@@ -8,6 +8,7 @@ import torch
 from PIL import Image
 
 # ---- Model config (avoid gated weights) -------------------------------------
+# For best identity/quality you generally want SDXL + a FaceID adapter, but SD 1.5 is cheaper/faster.
 SD_MODEL_ID = os.environ.get("SD_MODEL_ID", "runwayml/stable-diffusion-v1-5")
 IP_ADAPTER_REPO = os.environ.get("IP_ADAPTER_REPO", "h94/IP-Adapter")
 IP_ADAPTER_WEIGHT = os.environ.get("IP_ADAPTER_WEIGHT", "ip-adapter-full-face_sd15.bin")
@@ -16,10 +17,11 @@ IP_ADAPTER_SUBFOLDER = os.environ.get("IP_ADAPTER_SUBFOLDER", "models")
 # ---- Generation defaults ----------------------------------------------------
 DEFAULT_STYLES = os.environ.get("DEFAULT_STYLES", "corporate,linkedin").split(",")
 DEFAULT_IMAGES_PER_STYLE = int(os.environ.get("DEFAULT_IMAGES_PER_STYLE", "1"))
-DEFAULT_STEPS_FAST = int(os.environ.get("DEFAULT_STEPS_FAST", "30"))
+DEFAULT_STEPS_FAST = int(os.environ.get("DEFAULT_STEPS_FAST", "32"))
 DEFAULT_STEPS_PREMIUM = int(os.environ.get("DEFAULT_STEPS_PREMIUM", "45"))
-DEFAULT_GUIDANCE = float(os.environ.get("DEFAULT_GUIDANCE", "6.0"))
-DEFAULT_IP_SCALE = float(os.environ.get("DEFAULT_IP_SCALE", "0.7"))
+DEFAULT_GUIDANCE = float(os.environ.get("DEFAULT_GUIDANCE", "5.5"))
+# Lower IP scale reduces the "sticker/paste-on face" effect.
+DEFAULT_IP_SCALE = float(os.environ.get("DEFAULT_IP_SCALE", "0.55"))
 
 FAST_STYLES = {
     "corporate": (
@@ -148,7 +150,8 @@ def handler(job: Dict[str, Any]):
             ip_adapter_image=face_img,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,
-            height=768,
+            # SD 1.5 often deforms faces at tall aspect ratios; square is more stable.
+            height=512,
             width=512,
         )
         img = result.images[0]

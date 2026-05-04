@@ -1,0 +1,9 @@
+node_modules/
+.next/
+.DS_Store
+.env
+.env.local
+data/jobs.json
+data/jobs.json.bak
+public/uploads/
+drizzle/

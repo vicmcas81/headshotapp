@@ -1,0 +1,25 @@
+# docker-compose.yml — Portraly.AI local development
+# Usage:  docker compose up -d
+#         docker compose down
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: portraly-db
+    restart: unless-stopped
+    ports:
+      - "5434:5432"   # 5434 on host (5432/5433 likely in use)
+    environment:
+      POSTGRES_USER: portraly
+      POSTGRES_PASSWORD: portraly_dev
+      POSTGRES_DB: portraly
+    volumes:
+      - portraly_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U portraly"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  portraly_pgdata:

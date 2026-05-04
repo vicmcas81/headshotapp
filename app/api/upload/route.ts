@@ -117,6 +117,13 @@ export async function POST(req: NextRequest) {
     const premiumBackend = process.env.PREMIUM_TIER_BACKEND || (USE_LOCAL_ML ? "local" : "fal");
 
     if (premiumBackend === "runpod") {
+      // Premium batching: queue premium jobs during the day; run them overnight to reduce cost.
+      const batchMode = (process.env.PREMIUM_BATCH_MODE ?? "true") === "true";
+      if (batchMode) {
+        await updateJob(jobId, { status: "queued_for_batch" as any });
+        return NextResponse.json({ jobId });
+      }
+
       const { premiumEndpointId } = getRunPodConfig();
       if (!premiumEndpointId) {
         return NextResponse.json({ error: "RUNPOD_PREMIUM_ENDPOINT_ID is required when PREMIUM_TIER_BACKEND=runpod." }, { status: 500 });
@@ -129,10 +136,11 @@ export async function POST(req: NextRequest) {
         face_image_base64: faceBase64,
         gender,
         styles: ["corporate", "linkedin", "executive"],
-        images_per_style: 1,
+        num_images: 3,
+        ip_adapter_scale: 1.1,
       });
 
-      await updateJob(jobId, { trainingRequestId: requestId });
+      await updateJob(jobId, { trainingRequestId: requestId, status: "generating" as any });
       return NextResponse.json({ jobId });
     }
 

@@ -1,0 +1,25 @@
+# InstaHeadshot — Local Training Dependencies
+# Install with: pip install -r requirements.txt
+
+# PyTorch (MPS backend for Apple Silicon)
+torch>=2.3.0
+torchvision>=0.18.0
+torchaudio>=2.3.0
+
+# Diffusion models
+diffusers[torch]>=0.28.0
+transformers>=4.40.0
+accelerate>=0.30.0
+peft>=0.11.0
+safetensors>=0.4.0
+
+# Tokenizers
+sentencepiece
+protobuf
+
+# Image processing
+Pillow>=10.0
+opencv-python-headless>=4.8.0
+
+# Optional: 8-bit optimizer (saves memory, may not work on MPS)
+# bitsandbytes>=0.43.0

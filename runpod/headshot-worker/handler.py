@@ -14,7 +14,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
 
 # SDXL FaceID (requires InsightFace embeddings)
 IP_ADAPTER_REPO = os.environ.get("IP_ADAPTER_REPO", "h94/IP-Adapter-FaceID")
-IP_ADAPTER_WEIGHT = os.environ.get("IP_ADAPTER_WEIGHT", "ip-adapter-faceid_sdxl.bin")
+IP_ADAPTER_WEIGHT = os.environ.get("IP_ADAPTER_WEIGHT", "ip-adapter-faceid-plusv2_sdxl.bin")
 IP_ADAPTER_SUBFOLDER = os.environ.get("IP_ADAPTER_SUBFOLDER", None)
 
 # ---- Generation defaults ----------------------------------------------------
@@ -23,7 +23,7 @@ DEFAULT_IMAGES_PER_STYLE = int(os.environ.get("DEFAULT_IMAGES_PER_STYLE", "1"))
 DEFAULT_STEPS_FAST = int(os.environ.get("DEFAULT_STEPS_FAST", "32"))
 DEFAULT_STEPS_PREMIUM = int(os.environ.get("DEFAULT_STEPS_PREMIUM", "45"))
 DEFAULT_GUIDANCE = float(os.environ.get("DEFAULT_GUIDANCE", "5.5"))
-DEFAULT_IP_SCALE = float(os.environ.get("DEFAULT_IP_SCALE", "0.75"))
+DEFAULT_IP_SCALE = float(os.environ.get("DEFAULT_IP_SCALE", "1.0"))
 
 FAST_STYLES = {
     "corporate": (
@@ -69,15 +69,26 @@ def _get_pipe():
         return _pipe
 
     from diffusers import AutoPipelineForText2Image, DDIMScheduler
+    from transformers import CLIPVisionModelWithProjection
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
+
+    # FaceID Plus v2 needs a CLIP image encoder for additional face/style conditioning.
+    image_encoder = None
+    if "plus" in (IP_ADAPTER_WEIGHT or "").lower():
+        image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+            "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+            torch_dtype=dtype,
+            token=HF_TOKEN,
+        )
 
     pipe = AutoPipelineForText2Image.from_pretrained(
         SD_MODEL_ID,
         torch_dtype=dtype,
         safety_checker=None,
         requires_safety_checker=False,
+        image_encoder=image_encoder,
         token=HF_TOKEN,
     )
     # DDIM is recommended for face models.
@@ -125,12 +136,36 @@ def _faceid_embeds(face_img: Image.Image, device: torch.device, dtype: torch.dty
     faces = app.get(img)
     if not faces:
         raise RuntimeError("No face detected in input image.")
+    # Pick the most prominent face (largest bbox area, then highest score).
+    faces = sorted(
+        faces,
+        key=lambda f: ((f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]), getattr(f, "det_score", 0.0)),
+        reverse=True,
+    )
     emb = torch.from_numpy(faces[0].normed_embedding).unsqueeze(0)  # (1, 512)
     # diffusers expects shape like (2,1,1,512) when concatenating negative/positive
     ref = emb.unsqueeze(0).unsqueeze(0)  # (1,1,1,512)
     neg = torch.zeros_like(ref)
     id_embeds = torch.cat([neg, ref], dim=0).to(device=device, dtype=dtype)  # (2,1,1,512)
     return [id_embeds]
+
+def _apply_plus_v2_clip_embeds(pipe, face_img: Image.Image, num_images: int):
+    # For FaceID Plus v2, diffusers requires setting clip_embeds on the image projection layer.
+    # See diffusers docs: using-diffusers/ip_adapter.md (FaceID Plus v2 section).
+    try:
+        clip_embeds = pipe.prepare_ip_adapter_image_embeds(
+            [face_img],
+            None,
+            pipe.device,
+            num_images,
+            True,
+        )[0]
+        layer = pipe.unet.encoder_hid_proj.image_projection_layers[0]
+        layer.clip_embeds = clip_embeds.to(dtype=pipe.unet.dtype, device=pipe.device)
+        # For plus v2, shortcut should be disabled.
+        layer.shortcut = False
+    except Exception as e:
+        raise RuntimeError(f"Failed to prepare FaceID Plus clip embeddings: {e}")
 
 
 def _encode_png_b64(img: Image.Image) -> str:
@@ -168,12 +203,16 @@ def handler(job: Dict[str, Any]):
         images_per_style = int(inp.get("images_per_style") or DEFAULT_IMAGES_PER_STYLE)
     steps = int(inp.get("steps") or (DEFAULT_STEPS_PREMIUM if tier == "premium" else DEFAULT_STEPS_FAST))
     guidance_scale = float(inp.get("guidance_scale") or DEFAULT_GUIDANCE)
+    ip_scale = float(inp.get("ip_adapter_scale") or DEFAULT_IP_SCALE)
 
     pipe = _get_pipe()
+    pipe.set_ip_adapter_scale(ip_scale)
     device = pipe.device
 
     face_img = _decode_image_b64(face_b64).resize((512, 512))
     id_embeds = _faceid_embeds(face_img, device=device, dtype=pipe.unet.dtype)
+    if "plus" in (IP_ADAPTER_WEIGHT or "").lower():
+        _apply_plus_v2_clip_embeds(pipe, face_img, num_images)
 
     outputs: List[Dict[str, Any]] = []
     i = 0

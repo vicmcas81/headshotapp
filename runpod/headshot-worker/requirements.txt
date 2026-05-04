@@ -4,4 +4,5 @@ transformers==4.53.3
 accelerate==1.10.0
 safetensors==0.6.2
 pillow==11.3.0
-numpy==2.0.2
+# numpy 2.x can fail to import with some torch builds; torch then reports "Numpy is not available".
+numpy==1.26.4

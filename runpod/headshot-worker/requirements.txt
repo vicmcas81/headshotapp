@@ -6,3 +6,6 @@ safetensors==0.6.2
 pillow==11.3.0
 # numpy 2.x can fail to import with some torch builds; torch then reports "Numpy is not available".
 numpy==1.26.4
+insightface==0.7.3
+onnxruntime==1.18.1
+opencv-python-headless==4.10.0.84

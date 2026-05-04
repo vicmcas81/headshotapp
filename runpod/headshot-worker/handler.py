@@ -8,11 +8,14 @@ import torch
 from PIL import Image
 
 # ---- Model config (avoid gated weights) -------------------------------------
-# For best identity/quality you generally want SDXL + a FaceID adapter, but SD 1.5 is cheaper/faster.
-SD_MODEL_ID = os.environ.get("SD_MODEL_ID", "runwayml/stable-diffusion-v1-5")
-IP_ADAPTER_REPO = os.environ.get("IP_ADAPTER_REPO", "h94/IP-Adapter")
-IP_ADAPTER_WEIGHT = os.environ.get("IP_ADAPTER_WEIGHT", "ip-adapter-full-face_sd15.bin")
-IP_ADAPTER_SUBFOLDER = os.environ.get("IP_ADAPTER_SUBFOLDER", "models")
+# For best identity/quality use SDXL + FaceID.
+SD_MODEL_ID = os.environ.get("SD_MODEL_ID", "stabilityai/stable-diffusion-xl-base-1.0")
+HF_TOKEN = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+
+# SDXL FaceID (requires InsightFace embeddings)
+IP_ADAPTER_REPO = os.environ.get("IP_ADAPTER_REPO", "h94/IP-Adapter-FaceID")
+IP_ADAPTER_WEIGHT = os.environ.get("IP_ADAPTER_WEIGHT", "ip-adapter-faceid_sdxl.bin")
+IP_ADAPTER_SUBFOLDER = os.environ.get("IP_ADAPTER_SUBFOLDER", None)
 
 # ---- Generation defaults ----------------------------------------------------
 DEFAULT_STYLES = os.environ.get("DEFAULT_STYLES", "corporate,linkedin").split(",")
@@ -20,8 +23,7 @@ DEFAULT_IMAGES_PER_STYLE = int(os.environ.get("DEFAULT_IMAGES_PER_STYLE", "1"))
 DEFAULT_STEPS_FAST = int(os.environ.get("DEFAULT_STEPS_FAST", "32"))
 DEFAULT_STEPS_PREMIUM = int(os.environ.get("DEFAULT_STEPS_PREMIUM", "45"))
 DEFAULT_GUIDANCE = float(os.environ.get("DEFAULT_GUIDANCE", "5.5"))
-# Lower IP scale reduces the "sticker/paste-on face" effect.
-DEFAULT_IP_SCALE = float(os.environ.get("DEFAULT_IP_SCALE", "0.55"))
+DEFAULT_IP_SCALE = float(os.environ.get("DEFAULT_IP_SCALE", "0.75"))
 
 FAST_STYLES = {
     "corporate": (
@@ -58,6 +60,7 @@ NEGATIVE_PROMPT = (
 
 
 _pipe = None
+_face_app = None
 
 
 def _get_pipe():
@@ -65,24 +68,27 @@ def _get_pipe():
     if _pipe is not None:
         return _pipe
 
-    from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
+    from diffusers import AutoPipelineForText2Image, DDIMScheduler
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
 
-    pipe = StableDiffusionPipeline.from_pretrained(
+    pipe = AutoPipelineForText2Image.from_pretrained(
         SD_MODEL_ID,
         torch_dtype=dtype,
         safety_checker=None,
         requires_safety_checker=False,
+        token=HF_TOKEN,
     )
-    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config, use_karras_sigmas=True)
+    # DDIM is recommended for face models.
+    pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
     pipe = pipe.to(device)
 
     pipe.load_ip_adapter(
         IP_ADAPTER_REPO,
         subfolder=IP_ADAPTER_SUBFOLDER,
         weight_name=IP_ADAPTER_WEIGHT,
+        image_encoder_folder=None,
     )
     pipe.set_ip_adapter_scale(DEFAULT_IP_SCALE)
 
@@ -96,6 +102,35 @@ def _decode_image_b64(b64: str) -> Image.Image:
         b64 = b64.split(",", 1)[1]
     data = base64.b64decode(b64)
     return Image.open(io.BytesIO(data)).convert("RGB")
+
+def _get_face_app():
+    global _face_app
+    if _face_app is not None:
+        return _face_app
+    from insightface.app import FaceAnalysis
+    # Prefer CUDA if available, otherwise CPU.
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if torch.cuda.is_available() else ["CPUExecutionProvider"]
+    app = FaceAnalysis(name="buffalo_l", providers=providers)
+    # ctx_id=0 for GPU, -1 for CPU
+    app.prepare(ctx_id=0 if torch.cuda.is_available() else -1, det_size=(640, 640))
+    _face_app = app
+    return _face_app
+
+
+def _faceid_embeds(face_img: Image.Image, device: torch.device, dtype: torch.dtype):
+    import numpy as np
+    import cv2
+    app = _get_face_app()
+    img = cv2.cvtColor(np.asarray(face_img), cv2.COLOR_RGB2BGR)
+    faces = app.get(img)
+    if not faces:
+        raise RuntimeError("No face detected in input image.")
+    emb = torch.from_numpy(faces[0].normed_embedding).unsqueeze(0)  # (1, 512)
+    # diffusers expects shape like (2,1,1,512) when concatenating negative/positive
+    ref = emb.unsqueeze(0).unsqueeze(0)  # (1,1,1,512)
+    neg = torch.zeros_like(ref)
+    id_embeds = torch.cat([neg, ref], dim=0).to(device=device, dtype=dtype)  # (2,1,1,512)
+    return [id_embeds]
 
 
 def _encode_png_b64(img: Image.Image) -> str:
@@ -138,6 +173,7 @@ def handler(job: Dict[str, Any]):
     device = pipe.device
 
     face_img = _decode_image_b64(face_b64).resize((512, 512))
+    id_embeds = _faceid_embeds(face_img, device=device, dtype=pipe.unet.dtype)
 
     outputs: List[Dict[str, Any]] = []
     i = 0
@@ -147,12 +183,11 @@ def handler(job: Dict[str, Any]):
         result = pipe(
             prompt=prompt,
             negative_prompt=NEGATIVE_PROMPT,
-            ip_adapter_image=face_img,
+            ip_adapter_image_embeds=id_embeds,
             num_inference_steps=steps,
             guidance_scale=guidance_scale,
-            # SD 1.5 often deforms faces at tall aspect ratios; square is more stable.
-            height=512,
-            width=512,
+            height=1024,
+            width=1024,
         )
         img = result.images[0]
         outputs.append(
